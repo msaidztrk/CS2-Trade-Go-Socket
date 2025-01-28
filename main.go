@@ -1,45 +1,69 @@
 package main
 
 import (
+	"fmt"
 	"log"
-
-	"CS2-Trade-Go-Socket/auth"
-	"CS2-Trade-Go-Socket/bidding"
-	"CS2-Trade-Go-Socket/websocket"
+	"time"
 
 	"github.com/joho/godotenv"
+	"CS2-Trade-Go-Socket/listings"
 )
 
 func main() {
-	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	// Authenticate and get WebSocket token
-	token, err := auth.Authenticate()
-	if err != nil {
-		log.Fatalf("Authentication failed: %v", err)
-	}
+	currentPage := 1
+	totalItems := 0
 
-	// Connect to WebSocket
-	conn, err := websocket.Connect("wss://ws.csgoempire.com", map[string]string{
-		"Authorization": "Bearer " + token,
-	})
-	if err != nil {
-		log.Fatalf("WebSocket connection failed: %v", err)
-	}
-	defer conn.Close()
-
-	// Subscribe to the bidding channel
-	if err := websocket.Subscribe(conn, "bidding"); err != nil {
-		log.Fatalf("Failed to subscribe to bidding channel: %v", err)
-	}
-
-	// Handle incoming messages
-	websocket.ReadMessages(conn, func(data map[string]interface{}) {
-		if data["channel"] == "bidding" {
-			bidding.HandleBiddingUpdate(conn, data)
+	for {
+		items, pagination, err := listings.GetListedItems(currentPage)
+		if err != nil {
+			log.Fatalf("Failed to fetch listings: %v", err)
 		}
-	})
+
+		if len(items) == 0 {
+			break
+		}
+
+		totalItems += len(items)
+		fmt.Printf("Page %d/%d (%d items)\n", 
+			pagination.CurrentPage,
+			pagination.LastPage,
+			len(items),
+		)
+
+		for _, item := range items {
+			fmt.Printf(
+				"[%d] %-40s $%7.2f  %s\n",
+				item.ID,
+				truncateString(item.MarketName, 35),
+				item.Price/100,
+				formatTime(item.CreatedAt),
+			)
+		}
+
+		if currentPage >= pagination.LastPage {
+			break
+		}
+		currentPage++
+	}
+
+	fmt.Printf("\nTotal listed items found: %d\n", totalItems)
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func formatTime(isoTime string) string {
+	t, err := time.Parse(time.RFC3339, isoTime)
+	if err != nil {
+		return "invalid timestamp"
+	}
+	return t.Format("2006-01-02 15:04")
 }
