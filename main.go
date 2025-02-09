@@ -1,78 +1,87 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
-	"CS2-Trade-Go-Socket/listings"
 )
 
-func coinFormat(v float64) string {
-    return fmt.Sprintf("coin %.2f", v)
-}
-
-func wearFormat(name string, value float64) string {
-    return fmt.Sprintf("%s (%.4f)", name, value)
-}
+const csgoEmpireWSURL = "wss://trade.csgoempire.com/s/?EIO=3&transport=websocket"
 
 func main() {
+	// Get API key from environment
 	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
+		log.Printf("Warning: No .env file found: %v", err)
 	}
 
-	currentPage := 1
-	totalItems := 0
+	apiKey := os.Getenv("CSGO_EMPIRE_API_KEY")
+	if apiKey == "" {
+		log.Fatal("CSGO_EMPIRE_API_KEY not found in environment variables")
+	}
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+
+	// Create WebSocket connection with auth header
+	header := make(http.Header)
+	header.Add("Authorization", "Bearer "+apiKey)
+
+	conn, _, err := websocket.DefaultDialer.Dial(csgoEmpireWSURL, header)
+	if err != nil {
+		log.Fatal("Connection error:", err)
+	}
+	defer conn.Close()
+
+	log.Println("Successfully connected to CSGOEmpire WebSocket")
+
+	// Subscribe to deposits channel
+	subscribeMessage := []byte(`{
+		"event": "subscribe",
+		"data": {
+			"channel": "deposits"
+		}
+	}`)
+
+	if err := conn.WriteMessage(websocket.TextMessage, subscribeMessage); err != nil {
+		log.Fatal("Subscribe error:", err)
+	}
+
+	// Message handling loop
+	go func() {
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("Read error:", err)
+				return
+			}
+			log.Printf("Received update: %s\n", message)
+		}
+	}()
+
+	// Connection maintenance
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		items, pagination, err := listings.GetListedItems(currentPage)
-		if err != nil {
-			log.Fatalf("Failed to fetch listings: %v", err)
+		select {
+		case <-ticker.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Println("Ping error:", err)
+				return
+			}
+		case <-interrupt:
+			log.Println("Closing connection...")
+			err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			if err != nil {
+				log.Println("Close error:", err)
+			}
+			return
 		}
-
-		if len(items) == 0 {
-			break
-		}
-
-		// Filter out items containing "StatTrak™", "Sticker", "Tag", or "Souvenir"
-		filteredItems := listings.FilterItems(items)
-		totalItems += len(filteredItems)
-		fmt.Printf("\n=== Page %d/%d (%d items) ===\n", 
-			pagination.CurrentPage,
-			pagination.LastPage,
-			len(filteredItems),
-		)
-
-		for _, item := range filteredItems {
-			println(
-				item.ID , " | Name : " ,  truncateString(item.MarketName, 45) , 
-				" Price: " , coinFormat(item.Price) , " | Market Value: " , coinFormat(item.MarketValue)  , " | Suggested : ", coinFormat(item.SuggestedPrice) , "\n"+
-				"Profit: " , coinFormat(item.SuggestedPrice-item.Price) , " | Above Recommended: " ,  coinFormat(item.AboveRecommended) , "\n" +
-				"Wear: ",wearFormat(item.WearName, item.Wear) ,"\n",
-			)
-		}
-
-		if currentPage >= pagination.LastPage {
-			break
-		}
-		currentPage++
 	}
-
-	fmt.Printf("\nTotal listed items found: %d\n", totalItems)
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
-func formatTime(isoTime string) string {
-	t, err := time.Parse(time.RFC3339Nano, isoTime)
-	if err != nil {
-		return isoTime
-	}
-	return t.Format("2006-01-02 15:04")
 }
